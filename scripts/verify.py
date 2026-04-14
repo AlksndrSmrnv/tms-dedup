@@ -145,7 +145,11 @@ def main() -> None:
         except json.JSONDecodeError:
             # Try to salvage JSON object by finding first "{" and last "}"
             start, end = raw.find("{"), raw.rfind("}")
-            parsed = json.loads(raw[start : end + 1]) if start >= 0 and end > start else {"results": []}
+            try:
+                parsed = json.loads(raw[start : end + 1]) if start >= 0 and end > start else {"results": []}
+            except json.JSONDecodeError:
+                print(f"warning: could not parse response {resp_path}, skipping batch", file=sys.stderr)
+                parsed = {"results": []}
         results = {r["group_id"]: r for r in parsed.get("results", [])}
         for g in batch["groups"]:
             r = results.get(g["group_id"], {})
