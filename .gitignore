@@ -1,0 +1,10 @@
+__pycache__/
+*.pyc
+*.pyo
+.DS_Store
+tests.json
+clusters.json
+clusters_verified.json
+report.md
+prompts_out/
+responses_out/
