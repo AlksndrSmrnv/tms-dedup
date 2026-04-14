@@ -51,21 +51,27 @@ python scripts/cluster.py tests.json --out clusters.json --min-size 2
 
 Детерминированно, без LLM, работает на 2500+ тестах за минуты.
 
-### 3. Верификация через LLM
+### 3. Верификация через LLM — **делает САМ АГЕНТ qwen**
+
+`scripts/verify.py` не делает сетевых запросов к языковой модели. Это чистый оркестратор: он готовит промпты и потом агрегирует ответы. Всю работу с LLM выполняет агент qwen внутри qwen CLI.
+
+Последовательность:
+
 ```bash
+# шаг 3.1 — подготовка промптов
 python scripts/verify.py clusters.json tests.json --out clusters_verified.json --batch-tokens 100000
 ```
-Скрипт пакует кластеры в батчи под токен-бюджет и раскладывает промпты в `prompts_out/batch_NNN.txt`. Каждый промпт содержит:
+После этого в `prompts_out/batch_NNN.txt` лежат готовые промпты. Каждый содержит:
 - метку алгоритма и таблицу метрик пар
 - тесты с шагами
 - инструкцию с правилом disambiguator'а
 
-Для каждого промпта:
-1. Скорми `prompts_out/batch_NNN.txt` LLM (qwen-coder-next).
-2. Получишь строгий JSON `{"results": [...]}` с полями `severity`, `kind`, `common_check`, `master_id`, `drop_ids`, `rationale`.
-3. Сохрани JSON в `responses_out/batch_NNN.json`.
+Шаг 3.2 — для каждого `prompts_out/batch_NNN.txt` **ты, агент qwen**, должен:
+1. Прочитать файл с промптом.
+2. Сам обработать его своими силами (как LLM) — вернуть строгий JSON `{"results": [...]}` с полями `group_id`, `severity`, `kind`, `common_check`, `master_id`, `drop_ids`, `rationale`.
+3. Записать получившийся JSON в `responses_out/batch_NNN.json` (путь строго соответствующий — `batch_000` → `batch_000.json`).
 
-Затем перезапусти `verify.py` — он агрегирует ответы в `clusters_verified.json`. Альтернатива: флаг `--api` вызывает OpenAI-совместимый endpoint сам.
+Шаг 3.3 — повторить запуск `verify.py` с теми же аргументами. Скрипт перечитает `responses_out/` и агрегирует ответы в `clusters_verified.json`. Если каких-то батчей не хватает — скрипт напишет, сколько осталось; просто досчитай их и запусти ещё раз.
 
 ### 4. Отчёт
 ```bash

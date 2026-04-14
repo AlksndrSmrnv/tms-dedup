@@ -16,7 +16,7 @@ xlsx → extract → cluster (два сигнала: title, steps) → verify (L
    - `duplicate_partial` — умеренно близки
    - `same_intent_diff_flow` — одинаковое название, разные шаги
    - `suspicious_copypaste` — **идентичные шаги, disambiguator в названии** («(по счету)» vs «(по карте)») — почти всегда ошибка копипаста, НЕ дубликат
-3. **verify** — батчами отдаёт кластеры LLM, получает severity + kind + master + drop_ids
+3. **verify** — готовит промпты для батчей кластеров и агрегирует ответы. **Сам LLM не вызывает** — это делает агент qwen в qwen CLI (читает `prompts_out/batch_*.txt`, отвечает JSON'ом в `responses_out/batch_*.json`).
 4. **report** — markdown с 4 секциями по label и таблицами метрик пар
 
 LLM (qwen-coder-next, 130k ctx) видит только маленькие батчи кластеров — никогда все 2500 тестов сразу.
@@ -42,8 +42,10 @@ pip install -r requirements.txt
 python scripts/extract.py input.xlsx --out tests.json
 python scripts/cluster.py tests.json --out clusters.json
 python scripts/verify.py clusters.json tests.json
-# → prompts_out/batch_*.txt, скормить LLM, ответы в responses_out/batch_*.json
-python scripts/verify.py clusters.json tests.json  # агрегирует
+# → в prompts_out/batch_*.txt лежат готовые промпты. Агент qwen сам
+#   читает каждый промпт, обрабатывает его как LLM и пишет JSON-ответ
+#   в responses_out/batch_*.json. Никаких сетевых запросов из скрипта.
+python scripts/verify.py clusters.json tests.json  # повторный запуск агрегирует ответы
 python scripts/report.py clusters_verified.json tests.json --out report.md
 ```
 
@@ -72,4 +74,4 @@ python scripts/report.py clusters_verified.json tests.json --out report.md
 ## Embedder'ы
 
 Дефолтный — char n-gram TF-IDF (offline, без зависимостей от GPU/API).
-Для лучшего recall на перефразах подключи `sbert` или `api` (см. `scripts/embedders/`).
+Скрипты принципиально не делают запросов к LLM — всю языковую обработку делает агент qwen.

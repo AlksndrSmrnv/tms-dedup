@@ -1,14 +1,18 @@
 #!/usr/bin/env python3
-"""Batch candidate clusters under a token budget and verify via LLM.
+"""Prepare LLM prompts for candidate clusters and aggregate LLM responses.
 
-Two modes:
-  default (agent-driven): write prompts to prompts_out/ and expect the caller
-    (qwen CLI / human) to return JSON responses as responses_out/batch_*.json.
-  --api: call an OpenAI-compatible endpoint directly.
+This script does NOT call any LLM. It is a pure orchestrator: the qwen CLI
+agent (or a human) must feed each prompt to the model and drop the JSON
+reply into responses_out/. Running this script is idempotent — re-run after
+dropping responses and it will aggregate whatever is present.
+
+Flow:
+  1. First run: reads clusters.json + tests.json, writes prompts_out/batch_NNN.txt.
+  2. Agent feeds each prompt to the LLM, saves reply as responses_out/batch_NNN.json.
+  3. Second run: same command, now aggregates responses into clusters_verified.json.
 """
 import argparse
 import json
-import os
 import sys
 from pathlib import Path
 
@@ -85,25 +89,19 @@ def build_prompt(header: str, batch: dict) -> str:
     return f"{header}\n{body}\n\n=== КОНЕЦ ГРУПП ==="
 
 
-def call_openai_api(prompt: str, model: str, base_url: str, api_key: str) -> str:
-    import urllib.request
-
-    payload = json.dumps(
-        {
-            "model": model,
-            "messages": [{"role": "user", "content": prompt}],
-            "temperature": 0,
-            "response_format": {"type": "json_object"},
-        }
-    ).encode("utf-8")
-    req = urllib.request.Request(
-        f"{base_url.rstrip('/')}/chat/completions",
-        data=payload,
-        headers={"Content-Type": "application/json", "Authorization": f"Bearer {api_key}"},
-    )
-    with urllib.request.urlopen(req, timeout=300) as resp:
-        data = json.loads(resp.read().decode("utf-8"))
-    return data["choices"][0]["message"]["content"]
+def parse_response(raw: str, resp_path: Path) -> dict:
+    """Parse LLM JSON reply; salvage between outermost braces if wrapped."""
+    try:
+        return json.loads(raw)
+    except json.JSONDecodeError:
+        start, end = raw.find("{"), raw.rfind("}")
+        if start >= 0 and end > start:
+            try:
+                return json.loads(raw[start : end + 1])
+            except json.JSONDecodeError:
+                pass
+        print(f"warning: could not parse response {resp_path}, skipping batch", file=sys.stderr)
+        return {"results": []}
 
 
 def main() -> None:
@@ -113,12 +111,12 @@ def main() -> None:
     ap.add_argument("--out", type=Path, default=Path("clusters_verified.json"))
     ap.add_argument("--prompts-dir", type=Path, default=Path("prompts_out"))
     ap.add_argument("--responses-dir", type=Path, default=Path("responses_out"))
-    ap.add_argument("--prompt-template", type=Path, default=Path(__file__).parent.parent / "prompts" / "verify_cluster.txt")
+    ap.add_argument(
+        "--prompt-template",
+        type=Path,
+        default=Path(__file__).parent.parent / "prompts" / "verify_cluster.txt",
+    )
     ap.add_argument("--batch-tokens", type=int, default=100000)
-    ap.add_argument("--api", action="store_true", help="Call OpenAI-compatible API directly")
-    ap.add_argument("--api-base", default=os.environ.get("OPENAI_BASE_URL", "https://api.openai.com/v1"))
-    ap.add_argument("--api-key-env", default="OPENAI_API_KEY")
-    ap.add_argument("--model", default="qwen-coder-next")
     args = ap.parse_args()
 
     clusters = json.loads(args.clusters.read_text(encoding="utf-8"))
@@ -130,50 +128,20 @@ def main() -> None:
     args.prompts_dir.mkdir(parents=True, exist_ok=True)
     args.responses_dir.mkdir(parents=True, exist_ok=True)
 
+    # Always (re)write prompts — cheap and keeps them in sync with clusters.json.
     for i, batch in enumerate(batches):
         prompt = build_prompt(header, batch)
         (args.prompts_dir / f"batch_{i:03d}.txt").write_text(prompt, encoding="utf-8")
 
-    print(f"prepared {len(batches)} batches in {args.prompts_dir}")
-
-    if args.api:
-        api_key = os.environ.get(args.api_key_env)
-        if not api_key:
-            sys.exit(f"env var {args.api_key_env} is not set")
-        for i, batch in enumerate(batches):
-            resp_path = args.responses_dir / f"batch_{i:03d}.json"
-            if resp_path.exists():
-                print(f"batch {i}: cached")
-                continue
-            prompt = build_prompt(header, batch)
-            print(f"batch {i}: calling {args.model}…")
-            raw = call_openai_api(prompt, args.model, args.api_base, api_key)
-            resp_path.write_text(raw, encoding="utf-8")
-    else:
-        print(
-            f"agent mode: feed each prompts_out/batch_NNN.txt to the LLM, "
-            f"save JSON replies to {args.responses_dir}/batch_NNN.json, then rerun this script."
-        )
-
-    # Aggregate responses into verified clusters.
-    verified = []
+    # Aggregate any responses already present.
+    verified: list[dict] = []
     missing = 0
     for i, batch in enumerate(batches):
         resp_path = args.responses_dir / f"batch_{i:03d}.json"
         if not resp_path.exists():
             missing += 1
             continue
-        raw = resp_path.read_text(encoding="utf-8")
-        try:
-            parsed = json.loads(raw)
-        except json.JSONDecodeError:
-            # Try to salvage JSON object by finding first "{" and last "}"
-            start, end = raw.find("{"), raw.rfind("}")
-            try:
-                parsed = json.loads(raw[start : end + 1]) if start >= 0 and end > start else {"results": []}
-            except json.JSONDecodeError:
-                print(f"warning: could not parse response {resp_path}, skipping batch", file=sys.stderr)
-                parsed = {"results": []}
+        parsed = parse_response(resp_path.read_text(encoding="utf-8"), resp_path)
         results = {r["group_id"]: r for r in parsed.get("results", [])}
         for g in batch["groups"]:
             r = results.get(g["group_id"], {})
@@ -193,7 +161,15 @@ def main() -> None:
             )
 
     args.out.write_text(json.dumps(verified, ensure_ascii=False, indent=2), encoding="utf-8")
-    print(f"wrote {len(verified)} verified groups → {args.out} (missing batches: {missing})")
+
+    print(f"prepared {len(batches)} prompt(s) in {args.prompts_dir}")
+    print(f"aggregated {len(verified)} verified group(s) → {args.out} (missing responses: {missing})")
+    if missing:
+        print(
+            f"next step: feed each prompts_out/batch_NNN.txt to qwen, "
+            f"save the JSON reply to {args.responses_dir}/batch_NNN.json, then rerun this script.",
+            file=sys.stderr,
+        )
 
 
 if __name__ == "__main__":
