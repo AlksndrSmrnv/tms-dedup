@@ -157,7 +157,7 @@ def main() -> None:
                 {
                     "group_id": g["group_id"],
                     "test_ids": g["test_ids"],
-                    "severity": r.get("severity", "unknown"),
+                    "severity": r.get("severity") or "unknown",
                     "common_check": r.get("common_check", ""),
                     "master_id": r.get("master_id"),
                     "drop_ids": r.get("drop_ids", []),
