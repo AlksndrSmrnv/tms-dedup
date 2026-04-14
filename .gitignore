@@ -2,6 +2,8 @@ __pycache__/
 *.pyc
 *.pyo
 .DS_Store
+.venv/
+venv/
 tests.json
 clusters.json
 clusters_verified.json
