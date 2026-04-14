@@ -27,28 +27,52 @@ def render_test(test: dict) -> str:
     return "\n".join(lines)
 
 
-def render_group(group_id: str, test_ids: list[str], tests_by_id: dict[str, dict]) -> str:
-    header = f"--- GROUP {group_id} ---"
-    body = "\n\n".join(render_test(tests_by_id[tid]) for tid in test_ids if tid in tests_by_id)
-    return f"{header}\n{body}"
+def render_pair_metrics(pair_metrics: list[dict]) -> str:
+    if not pair_metrics:
+        return ""
+    lines = ["Метрики пар (sim_title / sim_steps):"]
+    for p in pair_metrics:
+        flag = " [disambig-conflict]" if p.get("disambig_conflict") else ""
+        lines.append(f"  {p['a']} ↔ {p['b']}: title={p['sim_title']}, steps={p['sim_steps']}{flag}")
+    return "\n".join(lines)
 
 
-def pack_batches(clusters: list[list[str]], tests_by_id: dict, prompt_header: str, budget: int) -> list[dict]:
+def render_group(cluster: dict, tests_by_id: dict[str, dict]) -> str:
+    header = f"--- GROUP {cluster['group_id']} (label={cluster['label']}) ---"
+    metrics = render_pair_metrics(cluster.get("pair_metrics", []))
+    body = "\n\n".join(
+        render_test(tests_by_id[tid]) for tid in cluster["test_ids"] if tid in tests_by_id
+    )
+    parts = [header]
+    if metrics:
+        parts.append(metrics)
+    parts.append(body)
+    return "\n".join(parts)
+
+
+def pack_batches(clusters: list[dict], tests_by_id: dict, prompt_header: str, budget: int) -> list[dict]:
     """Greedy packing of clusters into batches under the token budget."""
     batches: list[dict] = []
     current: list[dict] = []
     current_tokens = approx_tokens(prompt_header)
     reserve = 4000  # reserve for model answer
 
-    for idx, cluster in enumerate(clusters):
-        gid = f"g{idx}"
-        rendered = render_group(gid, cluster, tests_by_id)
+    for cluster in clusters:
+        rendered = render_group(cluster, tests_by_id)
         t = approx_tokens(rendered)
         if current and current_tokens + t + reserve > budget:
             batches.append({"groups": current})
             current = []
             current_tokens = approx_tokens(prompt_header)
-        current.append({"group_id": gid, "test_ids": cluster, "rendered": rendered})
+        current.append(
+            {
+                "group_id": cluster["group_id"],
+                "label": cluster["label"],
+                "test_ids": cluster["test_ids"],
+                "pair_metrics": cluster.get("pair_metrics", []),
+                "rendered": rendered,
+            }
+        )
         current_tokens += t
 
     if current:
@@ -156,11 +180,14 @@ def main() -> None:
             verified.append(
                 {
                     "group_id": g["group_id"],
+                    "label": g["label"],
                     "test_ids": g["test_ids"],
+                    "pair_metrics": g.get("pair_metrics", []),
                     "severity": r.get("severity") or "unknown",
+                    "kind": r.get("kind") or "unknown",
                     "common_check": r.get("common_check", ""),
                     "master_id": r.get("master_id"),
-                    "drop_ids": r.get("drop_ids", []),
+                    "drop_ids": r.get("drop_ids") or [],
                     "rationale": r.get("rationale", ""),
                 }
             )
